@@ -8,3 +8,6 @@ test/.ipynb_checkpoints
 offline/.ipynb_checkpoints
 offline/kf/.ipynb_checkpoints
 
+/.direnv/
+/compile_commands.json
+/.cache/
