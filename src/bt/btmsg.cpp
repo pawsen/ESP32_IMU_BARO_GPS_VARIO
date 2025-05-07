@@ -24,37 +24,51 @@ void callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param){
 		}
 	}
 
-bool btmsg_init(){
-	pSerialBT = new BluetoothSerial;
-	if (pSerialBT == NULL) {
-		ESP_LOGE(TAG, "Error creating BluetoothSerial instance");
-		return false; 
-		}
-	pSerialBT->register_callback(callback);
-  	if(!pSerialBT->begin("ESP32-BT-Vario")){
-    	ESP_LOGE(TAG, "Error initializing ESP32-BT-Vario");
-		return false;
-  		}	
-	else{
-    	ESP_LOGD(TAG, "ESP32-BT-Vario initialized");
-		return true;
-  		}
-	}
+bool btmsg_init() {
+    static BluetoothSerial serialBT;
+    pSerialBT = &serialBT;
+
+    if (!pSerialBT->register_callback(callback)) {
+        ESP_LOGE(TAG, "Failed to register BT callback");
+        return false;
+    }
+
+    if (!pSerialBT->begin(BT_DEVICE_NAME)) {
+        ESP_LOGE(TAG, "BT initialization failed");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "BT initialized successfully");
+    return true;
+}
 
 void btmsg_tx_message(const char* szmsg) {
 	pSerialBT->print(szmsg);
 	}
 
-static uint8_t btmsg_nmeaChecksum(const char *szNMEA){
-    const char* sz = &szNMEA[1]; // skip leading '$'
+
+static uint8_t btmsg_nmeaChecksum(const char *szNMEA) {
+    // The checksum is calculated by XOR-ing all characters between $ and * in the NMEA message
+    const char *sz = &szNMEA[1]; // skip leading '$'
     uint8_t cksum = 0;
     while ((*sz) != 0 && (*sz != '*')) {
-        cksum ^= (uint8_t) *sz;
+        cksum ^= (uint8_t)*sz;
         sz++;
-        }
-    return cksum;
     }
+    return cksum;
+}
 
+// Helper function for common NMEA message formatting
+static void formatNMEAMessage(char* szmsg, size_t maxLen, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(szmsg, maxLen, format, args);
+    va_end(args);
+
+    // \r\n adds NMEA message termination
+    uint8_t cksum = btmsg_nmeaChecksum(szmsg);
+    snprintf(szmsg + strlen(szmsg), maxLen - strlen(szmsg), "%02X\r\n", cksum);
+}
 
 /*
 LK8000 EXTERNAL INSTRUMENT SERIES 1 - NMEA SENTENCE: LK8EX1
@@ -96,13 +110,10 @@ Field 4, battery voltage or charge percentage
 	14% = 1014 .  Do not send float values for percentages.
 	Percentage should be 0 to 100, with no decimals, added by 1000!
 */
-void btmsg_genLK8EX1(char* szmsg, int32_t altm, int32_t cps, float batVoltage) {
-	sprintf(szmsg, "$LK8EX1,999999,%d,%d,99,%.1f*", altm, cps, batVoltage);
-	uint8_t cksum = btmsg_nmeaChecksum(szmsg);
-	char szcksum[5];
-	sprintf(szcksum,"%02X\r\n", cksum);
-	strcat(szmsg, szcksum);
-	}
+void btmsg_genLK8EX1(char *szmsg, int32_t altm, int32_t cps, float batVoltage) {
+    formatNMEAMessage(szmsg, BT_MSG_MAX_LEN, "$LK8EX1,999999,%d,%d,99,%.1f*", altm, cps,
+                      batVoltage);
+}
 
 /*
 (From XCSoar) Native XTRC sentences
@@ -111,30 +122,30 @@ $XCTRC,2015,1,5,16,34,33,36,46.947508,7.453117,540.32,12.35,270.4,2.78,,,,964.93
 $XCTRC,year,month,day,hour,minute,second,centisecond,latitude,longitude,altitude,speedoverground,
      course,climbrate,res,res,res,rawpressure,batteryindication*checksum
 */
-void btmsg_genXCTRC(char* szmsg) {
-	int32_t batteryPercent = (int32_t)((SupplyVoltageV*100.0f)/5.0f); // not really battery voltage, power comes from 5V power bank
-	CLAMP(batteryPercent, 0, 100); // some power banks supply more than 5V
-	float latDeg = FLOAT_DEG(NavPvt.nav.latDeg7);
-	float lonDeg = FLOAT_DEG(NavPvt.nav.lonDeg7);
-	float altM = ((float)NavPvt.nav.heightMSLmm)/1000.0f;
-	int year = NavPvt.nav.utcYear;
-	int month = NavPvt.nav.utcMonth;
-	int day = NavPvt.nav.utcDay;
-	int hour = NavPvt.nav.utcHour;
-	int minute = NavPvt.nav.utcMinute;
-	int second = NavPvt.nav.utcSecond;
-	int centisecond = NavPvt.nav.nanoSeconds/10000000;
-	float sogKph = ((float)NavPvt.nav.groundSpeedmmps)*0.0036f;
-//	float courseDeg = ((float)NavPvt.nav.headingMotionDeg5)/100000.0f; not implemented on gps module, junk readings
-	float courseDeg = (float)GpsCourseHeadingDeg;
+void btmsg_genXCTRC(char *szmsg) {
+    // not really battery voltage, power comes from 5V power bank
+    int32_t batteryPercent = (int32_t)((SupplyVoltageV * 100.0f) / 5.0f);
+    CLAMP(batteryPercent, 0, 100); // some power banks supply more than 5V
+    float latDeg = FLOAT_DEG(NavPvt.nav.latDeg7);
+    float lonDeg = FLOAT_DEG(NavPvt.nav.lonDeg7);
+    float altM = ((float)NavPvt.nav.heightMSLmm) / 1000.0f;
+    // clang-format off
+    formatNMEAMessage(szmsg, BT_MSG_MAX_LEN,
+        "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",
+        NavPvt.nav.utcYear, NavPvt.nav.utcMonth, NavPvt.nav.utcDay,
+        NavPvt.nav.utcHour, NavPvt.nav.utcMinute, NavPvt.nav.utcSecond,
+        NavPvt.nav.nanoSeconds / 10000000,
+        latDeg, lonDeg, altM,
+        NavPvt.nav.groundSpeedmmps * 0.0036f,
+        (float)GpsCourseHeadingDeg,
+        KFClimbrateCps * 0.01f,
 #if USE_MS5611
-	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,KFClimbrateCps/100.0f, PaSample_MS5611/100.0f,batteryPercent);
+        PaSample_MS5611 * 0.01f,
+#elif USE_BMP388
+        PaSample_BMP388 * 0.01f,
+#else
+        0.0f,
 #endif
-#if USE_BMP388
-	sprintf(szmsg, "$XCTRC,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%.2f,%.2f,%.1f,%.2f,,,,%.2f,%d*",year,month,day,hour,minute,second,centisecond,latDeg,lonDeg,altM,sogKph,courseDeg,KFClimbrateCps/100.0f, PaSample_BMP388/100.0f,batteryPercent);
-#endif
-	uint8_t cksum = btmsg_nmeaChecksum(szmsg);
-	char szcksum[5];
-	sprintf(szcksum,"%02X\r\n", cksum);
-	strcat(szmsg, szcksum);
-	}
+        batteryPercent);
+    // clang-format on
+}
