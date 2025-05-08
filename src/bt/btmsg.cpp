@@ -1,8 +1,9 @@
-#include "common.h"
-#include <BluetoothSerial.h>
-#include "config.h"
 #include "btmsg.h"
+#include "NimBLEDevice.h"
+#include "common.h"
+#include "config.h"
 #include "sensor/gps.h"
+#include <BluetoothSerial.h>
 #if USE_MS5611
 #include "sensor/ms5611.h"
 #endif
@@ -11,41 +12,78 @@
 #endif
 #include "ui/ui.h"
 
-static const char* TAG = "btmsg";
+static const char *TAG = "btmsg";
 
-BluetoothSerial* pSerialBT = NULL;
+// BLE Server objects
+BLEServer *pServer = nullptr;
+BLEService *pService = nullptr;
+BLECharacteristic *pCharacteristic = nullptr;
 
-void callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param){
-	if(event == ESP_SPP_SRV_OPEN_EVT){
-		ESP_LOGD(TAG, "BT client Connected");
-		}
-	if(event == ESP_SPP_CLOSE_EVT ){
-		ESP_LOGD(TAG, "BT client disconnected");
-		}
-	}
+bool deviceConnected = false;
+
+// Server callbacks
+class MyServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer *pServer) {
+        deviceConnected = true;
+        ESP_LOGI(TAG, "Device connected");
+    };
+
+    void onDisconnect(BLEServer *pServer) {
+        deviceConnected = false;
+        ESP_LOGI(TAG, "Device disconnected");
+        // Restart advertising to allow reconnection
+        pServer->startAdvertising();
+    }
+};
 
 bool btmsg_init() {
-    static BluetoothSerial serialBT;
-    pSerialBT = &serialBT;
+    // Initialize NimBLE
+    BLEDevice::init(BT_DEVICE_NAME);
+    BLEDevice::setMTU(512); // Request larger MTU size
 
-    if (!pSerialBT->register_callback(callback)) {
-        ESP_LOGE(TAG, "Failed to register BT callback");
-        return false;
-    }
+    // default power level is +3dB, max +9dB
+    // NimBLEDevice::setPower(ESP_PWR_LVL_N3); // -3dB
+    // NimBLEDevice::setPower(ESP_PWR_LVL_P6);  // +6db
+    NimBLEDevice::setPower(ESP_PWR_LVL_N0); // 0dB
 
-    if (!pSerialBT->begin(BT_DEVICE_NAME)) {
-        ESP_LOGE(TAG, "BT initialization failed");
-        return false;
-    }
+    NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setSecurityPasskey(123456);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
 
-    ESP_LOGI(TAG, "BT initialized successfully");
+    // Create BLE Server
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    // Create BLE Service
+    pService = pServer->createService(BTMSG_SERVICE_UUID);
+
+    // Create BLE Characteristic
+    pCharacteristic = pService->createCharacteristic(
+        BTMSG_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+
+    // Start the service
+    pService->start();
+
+    // Start advertising
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(BTMSG_SERVICE_UUID);
+    pAdvertising->setScanResponseData(BLEAdvertisementData());
+    pAdvertising->start();
+
+    ESP_LOGI(TAG, "BLE initialized successfully");
     return true;
 }
 
-void btmsg_tx_message(const char* szmsg) {
-	pSerialBT->print(szmsg);
-	}
-
+void btmsg_tx_message(const char *szmsg) {
+#ifdef BLE_DEBUG
+    dbg_printf(("%s", szmsg));
+#endif
+    if (deviceConnected) {
+        // pCharacteristic->setValue(reinterpret_cast<const uint8_t*>(szmsg), strlen(szmsg));
+        pCharacteristic->setValue((const uint8_t *)szmsg, strlen(szmsg));
+        pCharacteristic->notify();
+    }
+}
 
 static uint8_t btmsg_nmeaChecksum(const char *szNMEA) {
     // The checksum is calculated by XOR-ing all characters between $ and * in the NMEA message
@@ -59,7 +97,7 @@ static uint8_t btmsg_nmeaChecksum(const char *szNMEA) {
 }
 
 // Helper function for common NMEA message formatting
-static void formatNMEAMessage(char* szmsg, size_t maxLen, const char* format, ...) {
+static void formatNMEAMessage(char *szmsg, size_t maxLen, const char *format, ...) {
     va_list args;
     va_start(args, format);
     vsnprintf(szmsg, maxLen, format, args);
@@ -70,6 +108,7 @@ static void formatNMEAMessage(char* szmsg, size_t maxLen, const char* format, ..
     snprintf(szmsg + strlen(szmsg), maxLen - strlen(szmsg), "%02X\r\n", cksum);
 }
 
+// clang-format off
 /*
 LK8000 EXTERNAL INSTRUMENT SERIES 1 - NMEA SENTENCE: LK8EX1
 VERSION A, 110217
@@ -110,6 +149,7 @@ Field 4, battery voltage or charge percentage
 	14% = 1014 .  Do not send float values for percentages.
 	Percentage should be 0 to 100, with no decimals, added by 1000!
 */
+// clang-format on
 void btmsg_genLK8EX1(char *szmsg, int32_t altm, int32_t cps, float batVoltage) {
     formatNMEAMessage(szmsg, BT_MSG_MAX_LEN, "$LK8EX1,999999,%d,%d,99,%.1f*", altm, cps,
                       batVoltage);

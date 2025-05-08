@@ -1,8 +1,16 @@
 #ifndef BTMSG_H_
 #define BTMSG_H_
 
+#include <string>
+#include "NimBLEDevice.h"
+
+// BLE Service UUID
+#define BTMSG_SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+// Characteristic UUID for NMEA messages
+#define BTMSG_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
 #define BT_MSG_MAX_LEN 128
-#define BT_DEVICE_NAME "ESP32-BT-Vario"
+static const std::string BT_DEVICE_NAME = "ESP32-BLE-Vario";
 
 // Replace magic numbers.
 // XXX not used. Ideally we check if the reading is available, otherwise send this

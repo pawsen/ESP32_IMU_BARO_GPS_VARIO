@@ -271,6 +271,20 @@
 
 // print debug information to the serial port for different code modules
 
+// print debug information to the serial port for different code modules
+#define TOP_DEBUG 1
+#ifdef TOP_DEBUG
+#define dbg_println(x)                                                                             \
+    { Serial.println x; }
+#define dbg_printf(x)                                                                              \
+    { Serial.printf x; }
+#define dbg_flush() Serial.flush()
+#else
+#define dbg_println(x)
+#define dbg_printf(x)
+#define dbg_flush()
+#endif
+
 // these #defines can be left uncommented after debugging, as the enclosed
 // debug prints do not appear in the critical run-time loop
 #define MAIN_DEBUG
@@ -281,6 +295,7 @@
 #define MPU9250_DEBUG
 #define MS5611_DEBUG
 #define WEBCFG_DEBUG
+#define BLE_DEBUG 1
 
 // !! ensure these #defines are commented out after debugging, as the 
 // enclosed debug prints are in the critical run-time loop.
